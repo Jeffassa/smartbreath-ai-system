@@ -1,191 +1,226 @@
 import streamlit as st
 import pandas as pd
 import os
-from dotenv import load_dotenv
-import base64
-from streamlit_autorefresh import st_autorefresh
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-from io import BytesIO
-from sqlalchemy import create_engine
 import urllib.parse
-import matplotlib
-matplotlib.use('Agg')
+from datetime import datetime
+from dotenv import load_dotenv
+from streamlit_autorefresh import st_autorefresh
+from sqlalchemy import create_engine, text
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
-# Chargement des variables d'environnement
+# --- CONFIGURATION INITIALE ---
 load_dotenv()
 
-# Configuration de la page
-st.set_page_config(page_title="IA Respiratoire - Monitoring", layout="wide")
+st.set_page_config(page_title="SmartBreath AI - Expert Dashboard", layout="wide")
+st_autorefresh(interval=2000, key="datarefresh") 
 
-# Actualisation automatique toutes les 2 secondes
-st_autorefresh(interval=2000, key="datarefresh")
-
-def play_alarm():
-    """Diffuse un son d'alerte via HTML"""
-    sound_html = """
-        <audio autoplay>
-            <source src="https://www.soundjay.com/mechanical/smoke-detector-1.mp3" type="audio/mpeg">
-        </audio>
-    """
-    st.markdown(sound_html, unsafe_allow_html=True)
-
-# Styles CSS personnalisés (Clignotement URGENCE)
-st.markdown("""
-    <style>
-    @keyframes blinker { 50% { opacity: 0; } }
-    .blink-emergency {
-        background-color: #FF0000; color: white; padding: 15px;
-        border-radius: 10px; text-align: center; font-weight: bold;
-        font-size: 20px; animation: blinker 1s linear infinite; margin-bottom: 20px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# Configuration de la connexion Base de Données
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "database": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD")
-}
-
+# --- CONNEXION BASE DE DONNÉES ---
 @st.cache_resource
 def get_engine():
-    """Crée l'engine SQLAlchemy avec gestion des caractères spéciaux dans le MDP"""
-    user = DB_CONFIG['user']
-    # Encode le mot de passe pour gérer les caractères comme @ ou !
-    password = urllib.parse.quote_plus(str(DB_CONFIG['password'])) 
-    host = DB_CONFIG['host']
-    db = DB_CONFIG['database']
-    conn_url = f"postgresql+psycopg2://{user}:{password}@{host}:5432/{db}"
-    return create_engine(conn_url)
-
-def get_patients_list():
-    """Récupère la liste des patients pour la barre latérale"""
     try:
-        engine = get_engine()
-        query = "SELECT patient_id, nom, prenom FROM patients ORDER BY nom ASC"
-        df = pd.read_sql(query, engine)
-        df['display_name'] = df['nom'].str.upper() + " " + df['prenom']
-        return df
+        user = os.getenv("DB_USER")
+        password = urllib.parse.quote_plus(str(os.getenv("DB_PASSWORD")))
+        host = os.getenv("DB_HOST")
+        db = os.getenv("DB_NAME")
+        conn_url = f"postgresql+psycopg2://{user}:{password}@{host}:5432/{db}"
+        engine = create_engine(conn_url)
+        # Test de connexion
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return engine
     except Exception as e:
-        st.error(f"Erreur Base de Données : {e}")
+        st.error(f" Erreur de configuration DB : {e}")
+        return None
+
+def get_patient_details(p_id):
+    engine = get_engine()
+    if engine:
+        try:
+            query = text("SELECT * FROM patients WHERE patient_id::text = :p_id")
+            with engine.connect() as conn:
+                df = pd.read_sql(query, conn, params={"p_id": str(p_id)})
+                if not df.empty:
+                    return df.iloc[0]
+        except Exception as e:
+            st.error(f"Erreur détails patient : {e}")
+    return None
+
+def get_live_data(p_id):
+    engine = get_engine()
+    if not engine:
+        return pd.DataFrame()
+    
+    try:
+        # REQUÊTE MISE À JOUR : Ajout de la colonne TEMPERATURE
+        query = text("""
+            SELECT 
+                patient_id::text as patient_id,
+                spo2, 
+                bpm, 
+                temperature,
+                flow_rate,
+                muscle_strength, 
+                risk_score,
+                status,
+                recommendation,
+                timestamp AT TIME ZONE 'UTC' as timestamp
+            FROM sensor_data 
+            WHERE patient_id::text = :p_id 
+            ORDER BY timestamp DESC 
+            LIMIT 60
+        """)
+        
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn, params={"p_id": str(p_id)})
+        
+        if df.empty:
+            return pd.DataFrame()
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True).dt.tz_localize(None)
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Erreur SQL : {e}")
         return pd.DataFrame()
 
-def generate_pdf(df_patient, patient_name):
-    """Génère un rapport PDF avec graphique et statistiques"""
-    buffer = BytesIO()
+def check_connection_status(last_timestamp):
+    if pd.isna(last_timestamp):
+        return "🔴 AUCUNE DONNÉE", "Pas de données reçues"
     
-    # 1. Création de la figure Matplotlib
-    fig, ax = plt.subplots(figsize=(6, 3)) 
-    recent_data = df_patient.tail(30)
-    
-    ax.plot(recent_data['timestamp'], recent_data['spo2'], color='blue', label='SpO2 %')
-    ax.plot(recent_data['timestamp'], recent_data['bpm'], color='red', label='BPM')
-    
-    ax.set_title(f"Signes vitaux - {patient_name}")
-    ax.set_xticks([]) 
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    
-    # 2. Sauvegarde de l'image en mémoire
-    img_buffer = BytesIO()
-    fig.savefig(img_buffer, format='png', bbox_inches='tight')
-    plt.close(fig) 
-    img_buffer.seek(0)
-    
-    # 3. Construction du PDF
-    p = canvas.Canvas(buffer, pagesize=letter)
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(100, 750, f"RAPPORT MEDICAL : {patient_name}")
-    
-    p.setFont("Helvetica", 10)
-    p.drawString(100, 735, f"Genere le : {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}")
-    
-    p.drawImage(ImageReader(img_buffer), 50, 450, width=500, height=250)
-    
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(100, 420, "Resume des dernieres constantes :")
-    p.setFont("Helvetica", 11)
-    p.drawString(100, 400, f"- SpO2 Moyenne : {round(df_patient['spo2'].mean(),1)}%")
-    p.drawString(100, 380, f"- Rythme Cardiaque Max : {int(df_patient['bpm'].max())} BPM")
-    
-    p.showPage()
-    p.save()
-    buffer.seek(0)
-    return buffer
+    time_diff = (datetime.now() - last_timestamp).total_seconds()
+    if time_diff > 30: 
+        return "🔴 DÉCONNECTÉ", f"Dernière mesure il y a {int(time_diff)}s"
+    return "🟢 EN LIGNE", "Données reçues en temps réel"
 
-# --- BARRE LATÉRALE ---
-st.sidebar.header("Gestion des Dossiers")
-df_pats = get_patients_list()
-selected_id = None
+# --- SIDEBAR & SÉLECTION ---
+st.sidebar.title("Dashboard Medecin - SmartBreath AI")
+engine = get_engine()
 
-if not df_pats.empty:
-    patient_dict = dict(zip(df_pats['display_name'], df_pats['patient_id']))
-    selected_name = st.sidebar.selectbox("Choisir le patient :", list(patient_dict.keys()))
-    selected_id = str(patient_dict[selected_name])
+if not engine:
+    st.error("Impossible de se connecter à la base de données")
+    st.stop()
+
+try:
+    query_pats = text("SELECT patient_id::text as patient_id, nom, prenom, email FROM patients ORDER BY nom ASC")
+    with engine.connect() as conn:
+        df_pats = pd.read_sql(query_pats, conn)
     
-    if os.path.exists("live_data.csv"):
-        full_live = pd.read_csv("live_data.csv")
-        p_data = full_live[full_live['patient_id'].astype(str) == selected_id]
-        if not p_data.empty:
-            pdf_file = generate_pdf(p_data, selected_name)
-            st.sidebar.download_button(
-                label="Telecharger Rapport PDF",
-                data=pdf_file,
-                file_name=f"rapport_{selected_name.replace(' ','_')}.pdf",
-                mime="application/pdf"
-            )
-else:
-    st.sidebar.error("Impossible de charger la liste des patients.")
+    if df_pats.empty:
+        st.sidebar.warning("Aucun patient trouvé")
+        st.stop()
+    
+    patient_dict = dict(zip(
+        df_pats['nom'] + " " + df_pats['prenom'] + " (" + df_pats['email'] + ")", 
+        df_pats['patient_id']
+    ))
+    
+    selected_name = st.sidebar.selectbox("Choisir un patient :", list(patient_dict.keys()))
+    selected_id = patient_dict[selected_name]
+    
+except Exception as e:
+    st.sidebar.error(f"Erreur chargement patients : {e}")
+    selected_id = None
 
-# --- ZONE PRINCIPALE ---
-st.title("SmartBreath AI - Monitoring")
+# --- AFFICHAGE PRINCIPAL ---
+if selected_id:
+    patient_info = get_patient_details(selected_id)
+    user_data = get_live_data(selected_id)
 
-if os.path.exists("live_data.csv") and selected_id:
-    df_live = pd.read_csv("live_data.csv") 
-    user_data = df_live[df_live['patient_id'].astype(str) == selected_id].copy()
-
-    if not user_data.empty:
-        last = user_data.iloc[-1]
-        status_ia = str(last.get('status', 'NORMAL')).upper()
-        
-        # Détection Urgence
-        if last['bpm'] > 120 or "CRITIQUE" in status_ia:
-            st.markdown(f'<div class="blink-emergency">URGENCE CRITIQUE : {selected_name} - Intervention Immediate</div>', unsafe_allow_html=True)
-            play_alarm() 
-
-        # Métriques principales
-        c1, c2, c3 = st.columns(3)
-        c1.metric("SpO2", f"{last['spo2']}%")
-        c2.metric("Fréquence Cardiaque", f"{int(last['bpm'])} BPM")
-        c3.metric("Niveau de Risque IA", f"{round(last.get('risk_score', 0)*100)}%")
-
-        st.divider()
-        st.subheader("Analyse Prédictive de l'IA")
-        
-        # Affichage selon le statut IA
-        if "CRITIQUE" in status_ia:
-            st.error(f"**STATUT : {status_ia}** \n\n {last['recommendation']}")
-        elif "MODERE" in status_ia:
-            st.warning(f"**STATUT : {status_ia}** \n\n {last['recommendation']}")
-        else:
-            st.success(f"**STATUT : {status_ia}** \n\n {last['recommendation']}")
-
-        # Time To Crisis (TTC)
-        ttc = last.get('time_to_crisis')
-        if pd.notna(ttc) and ttc > 0:
-            st.info(f"**Alerte Anticipee :** Risque de crise d'ici environ **{ttc} minutes**.")
-
-        # Graphiques dynamiques
-        st.subheader("Evolution des Signes Vitaux (Temps Reel)")
-        graph_data = user_data.tail(50).set_index('timestamp')[['spo2', 'bpm']]
-        st.line_chart(graph_data)
-        
+    if user_data.empty:
+        st.warning(f"En attente de données pour {selected_name.split('(')[0]}...")
+    elif patient_info is None:
+        st.error(f"Patient introuvable")
     else:
-        st.info(f"En attente de réception des données capteurs pour **{selected_name}**...")
+        last = user_data.iloc[-1]
+        status_label, conseil = check_connection_status(last['timestamp'])
+        
+        # Titre et Alerte Critique
+        st.title(f"Monitoring : {patient_info['nom']} {patient_info['prenom']}")
+        
+        is_critique = str(last.get('status', '')).upper() == "CRITIQUE" or last['spo2'] < 90
+        if is_critique:
+            st.error(f"ALERTE CRITIQUE : {last.get('recommendation')}")
+
+        # --- MÉTRIQUES CLÉS ---
+        st.write("---")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        
+        # Oxygène
+        m1.metric("Oxygène (SpO2)", f"{last['spo2']}%", 
+                  delta=f"{last['spo2']-95:.1f}%" if last['spo2'] < 95 else None, delta_color="inverse")
+        
+        # Pouls
+        m2.metric("Pouls (BPM)", f"{int(last['bpm'])} bpm")
+        
+        # TEMPÉRATURE
+        temp_val = last.get('temperature', 36.6)
+        temp_delta = round(temp_val - 36.6, 1)
+        m3.metric("Température", f"{temp_val}°C", 
+                  delta=f"{temp_delta}°C" if abs(temp_delta) > 0.2 else None, 
+                  delta_color="inverse" if temp_val > 37.5 else "normal")
+        
+        # Autres
+        m4.metric("Force Musc.", f"{last.get('muscle_strength', 'N/A')}")
+        m5.metric("Débit d'air", f"{last.get('flow_rate', 'N/A')} L/m")
+
+        # --- GRAPHIQUES ---
+        st.subheader("Courbes Physiologiques")
+        
+        if len(user_data) > 1:
+            plt.style.use('dark_background')
+            fig, ax1 = plt.subplots(figsize=(12, 5))
+            fig.patch.set_facecolor('#0E1117')
+            ax1.set_facecolor('#1e2129')
+
+            # SpO2 sur l'axe principal
+            ax1.plot(user_data['timestamp'], user_data['spo2'], 
+                    color='#00d4ff', label='SpO2 (%)', linewidth=2, marker='o', markersize=4)
+            ax1.set_ylabel('% SpO2', color='#00d4ff')
+            ax1.set_ylim(min(75, user_data['spo2'].min()-5), 102)
+
+            # BPM sur le second axe
+            ax2 = ax1.twinx()
+            ax2.plot(user_data['timestamp'], user_data['bpm'], 
+                    color='#ff4b4b', label='BPM', linewidth=1.5, linestyle='--')
+            ax2.set_ylabel('BPM', color='#ff4b4b')
+            
+            # TEMPÉRATURE sur un troisième axe (tendance)
+            ax2.plot(user_data['timestamp'], user_data['temperature'] * 2, 
+                    color='#ffaa00', label='Temp (Tendance)', linewidth=1, alpha=0.6)
+
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            plt.xticks(rotation=45)
+            
+            lines, labels = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines + lines2, labels + labels2, loc='upper left')
+            
+            st.pyplot(fig)
+            plt.close(fig)
+
+        # --- PROFIL & ANALYSE IA ---
+        col_p, col_ia = st.columns(2)
+        with col_p:
+            st.subheader("Profil Patient")
+            st.write(f"**Pathologie :** :orange[{patient_info.get('pathologie')}]")
+            st.write(f"**Fumeur :** {'Oui' if patient_info.get('est_fumeur') else 'Non'}")
+            st.write(f"**Dernière activité :** {last['timestamp'].strftime('%H:%M:%S')}")
+            
+        with col_ia:
+            st.subheader("Analyse SmartBreath")
+            risk_pct = round(float(last.get('risk_score', 0)) * 100)
+            color_risk = "green" if risk_pct < 30 else "orange" if risk_pct < 70 else "red"
+            st.markdown(f"Probabilité de crise : <span style='color:{color_risk}; font-size:24px; font-weight:bold;'>{risk_pct}%</span>", unsafe_allow_html=True)
+            st.info(f"**Recommandation :** {last.get('recommendation')}")
+
+        # --- HISTORIQUE DÉTAILLÉ ---
+        with st.expander("Historique complet (60 dernières mesures)"):
+            cols_to_show = ['timestamp', 'spo2', 'bpm', 'temperature', 'status', 'recommendation']
+            # CORRECTION 2026 : width='stretch' remplace use_container_width=True
+            st.dataframe(user_data.sort_values('timestamp', ascending=False)[cols_to_show], width='stretch')
+
 else:
-    st.warning("Veuillez sélectionner un patient dans la barre latérale pour lancer le monitoring.")
+    st.info("Sélectionnez un patient dans la barre latérale pour commencer le monitoring.")
