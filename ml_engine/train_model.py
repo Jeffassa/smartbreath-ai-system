@@ -48,7 +48,6 @@ def generate_time_series_data(n_patients=500, timesteps_per_patient=60):
                 'target': 1 if (will_have_crisis and 0 <= time_to_crisis <= 7) else 0
             })
         
-        # Calcul des features temporelles par fenêtrage
         pdf = pd.DataFrame(patient_records)
         pdf['spo2_trend'] = pdf['spo2'].diff(periods=3).fillna(0)
         pdf['bpm_trend'] = pdf['bpm'].diff(periods=3).fillna(0)

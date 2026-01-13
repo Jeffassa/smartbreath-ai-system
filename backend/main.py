@@ -41,8 +41,6 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 
-# --- MODÈLES DE DONNÉES ---
-
 class RespiratoryMeasure(BaseModel):
     patient_id: str
     flow_rate: float
@@ -68,11 +66,11 @@ class UserLogin(BaseModel):
     password: str
 
 class ProfileUpdate(BaseModel):
-    taille_cm: int
-    poids_kg: float
-    pathologie: str
+    taille_cm: Optional[int] = None
+    poids_kg: Optional[float] = None
+    pathologie: Optional[str] = None
+    photo_base64: Optional[str] = None
 
-# --- FONCTIONS UTILITAIRES ---
 
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
@@ -82,15 +80,16 @@ def save_to_db(patient_id, measure, risk_score, status, recommendation):
         conn = get_db_connection()
         cur = conn.cursor()
         temp_value = float(measure.temperature)
+        
         query = """
             INSERT INTO sensor_data 
-            (patient_id, spo2, bpm, flow_rate, muscle_strength, temperature, risk_score, status, recommendation, timestamp)
+            (patient_id, timestamp, spo2, bpm, flow_rate, muscle_strength, risk_score, status, recommendation, temperature)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cur.execute(query, (
-            patient_id, measure.spo2, measure.bpm, measure.flow_rate, 
-            measure.muscle_strength,temp_value, measure.temperature, risk_score, 
-            status, recommendation, datetime.now()
+            patient_id,datetime.now(), measure.spo2, measure.bpm, measure.flow_rate, 
+            measure.muscle_strength, risk_score, 
+            status, recommendation,temp_value, 
         ))
         conn.commit()
         cur.close(); conn.close()
@@ -100,11 +99,19 @@ def save_to_db(patient_id, measure, risk_score, status, recommendation):
 def get_patient_context(patient_id):
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT age, taille_cm, pathologie, nom, prenom, est_fumeur, poids_kg FROM patients WHERE patient_id = %s", (patient_id,))
+        cur.execute("""
+            SELECT age, taille_cm, pathologie, nom, prenom, est_fumeur, poids_kg, email 
+            FROM patients WHERE patient_id = %s
+        """, (patient_id,))
         res = cur.fetchone(); cur.close(); conn.close()
         if res:
-            return {"age": res[0], "height": res[1], "pathologie": res[2], "nom": res[3], "prenom": res[4], "is_smoker": bool(res[5]), "weight": res[6]}
-    except: pass
+            return {
+                "age": res[0], "height": res[1], "pathologie": res[2], 
+                "nom": res[3], "prenom": res[4], "is_smoker": bool(res[5]), 
+                "weight": res[6], "email": res[7]
+            }
+    except Exception as e:
+        logger.error(f"Erreur contexte patient : {e}")
     return {"age": 45, "height": 170, "pathologie": "Non spécifié", "nom": "Patient", "prenom": "", "is_smoker": False, "weight": 70}
 
 def generate_mobile_response(status, recommendation, spo2):
@@ -115,8 +122,6 @@ def generate_mobile_response(status, recommendation, spo2):
         "STABLE": {"color": "green", "vibrate": False, "emergency": False}
     }
     return status_config.get(status, {"color": "grey", "vibrate": False, "emergency": False})
-
-# --- ENDPOINTS AUTH & PROFILE ---
 
 @app.post("/register")
 async def register(user: UserRegister):
@@ -138,7 +143,64 @@ async def login(credentials: UserLogin):
         return {"status": "success", "patient_id": str(user[0]), "nom": user[1]}
     raise HTTPException(status_code=401, detail="Identifiants incorrects")
 
-# --- ANALYSE IA ---
+@app.get("/profile/{patient_id}")
+async def get_profile(patient_id: str):
+    ctx = get_patient_context(patient_id)
+    return {"status": "success", "data": ctx}
+
+@app.put("/profile/{patient_id}")
+async def update_profile(patient_id: str, profile: ProfileUpdate):
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        updates = []
+        params = []
+        if profile.taille_cm is not None:
+            updates.append("taille_cm = %s"); params.append(profile.taille_cm)
+        if profile.poids_kg is not None:
+            updates.append("poids_kg = %s"); params.append(profile.poids_kg)
+        if profile.pathologie is not None:
+            updates.append("pathologie = %s"); params.append(profile.pathologie)
+        
+        if not updates:
+            return {"status": "no update needed"}
+
+        params.append(patient_id)
+        query = f"UPDATE patients SET {', '.join(updates)} WHERE patient_id = %s"
+        cur.execute(query, tuple(params))
+        conn.commit(); cur.close(); conn.close()
+        
+        logger.info(f"Profil recalibré pour le patient {patient_id}")
+        return {"status": "success", "message": "IA Recalibrée"}
+    except Exception as e:
+        logger.error(f"Erreur update profile : {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/status/{patient_id}")
+async def get_status(patient_id: str):
+    conn = get_db_connection(); cur = conn.cursor()
+    cur.execute("""
+        SELECT status, recommendation, spo2, bpm, risk_score, temperature, timestamp 
+        FROM sensor_data 
+        WHERE patient_id = %s 
+        ORDER BY timestamp DESC LIMIT 1
+    """, (patient_id,))
+    res = cur.fetchone(); cur.close(); conn.close()
+    
+    if res:
+        status_name = res[0]
+        mobile_config = generate_mobile_response(status_name, res[1], res[2])
+        return {
+            "status": status_name,
+            "recommendation": res[1],
+            "spo2": float(res[2]),
+            "bpm": int(res[3]),
+            "risk_score": float(res[4]),
+            "temperature": float(res[5]),
+            "color": mobile_config["color"],
+            "emergency": mobile_config["emergency"],
+            "last_update": res[6].isoformat()
+        }
+    return {"status": "STABLE", "recommendation": "Aucune donnée", "spo2": 0, "bpm": 0, "risk_score": 0, "temperature": 0}
 
 @app.post("/analyze")
 async def analyze(measure: RespiratoryMeasure):
@@ -161,11 +223,9 @@ async def analyze(measure: RespiratoryMeasure):
         "timestamp": datetime.now().isoformat()
     }
     
-    latest_results[measure.patient_id] = res_payload
     save_to_db(measure.patient_id, measure, risk_score, status, recommendation)
     return res_payload
 
-# --- STATS & DASHBOARD (DYNAMIQUE) ---
 
 @app.get("/dashboard-summary/{patient_id}")
 async def get_dashboard_summary(patient_id: str):
@@ -184,49 +244,32 @@ async def get_dashboard_summary(patient_id: str):
 
 @app.get("/stats/{patient_id}")
 async def get_stats_dynamique(patient_id: str, periode: str = "semaine"):
-    intervals = {"semaine": "7 days", "mois": "30 days", "annee": "1 year"}
-    interval = intervals.get(periode, "7 days")
-
+    days = 7 if periode == "semaine" else 30
+    if periode == "annee": days = 365
     conn = get_db_connection(); cur = conn.cursor()
     
-    # 1. Risque moyen actuel
-    cur.execute(f"SELECT AVG(risk_score) FROM sensor_data WHERE patient_id = %s AND timestamp > NOW() - INTERVAL '{interval}'", (patient_id,))
+    cur.execute("SELECT AVG(risk_score) FROM sensor_data WHERE patient_id = %s AND timestamp > NOW() - make_interval(days => %s)", (patient_id, days))
     actuel = cur.fetchone()[0] or 0
 
-    # 2. Amélioration (vs période précédente)
-    cur.execute(f"SELECT AVG(risk_score) FROM sensor_data WHERE patient_id = %s AND timestamp BETWEEN NOW() - INTERVAL '2 {interval}' AND NOW() - INTERVAL '{interval}'", (patient_id,))
-    precedent = cur.fetchone()[0] or actuel
-    diff = round((precedent - actuel) * 100, 1) 
-
-    # 3. Données du graphique (Risk evolution)
-    cur.execute(f"""
-        SELECT TO_CHAR(timestamp, 'DD/MM'), AVG(risk_score) * 100 
-        FROM sensor_data WHERE patient_id = %s AND timestamp > NOW() - INTERVAL '{interval}'
+    cur.execute("""
+        SELECT TO_CHAR(timestamp, 'DD/MM'), AVG(risk_score) * 100, AVG(temperature)
+        FROM sensor_data WHERE patient_id = %s AND timestamp > NOW() - make_interval(days => %s)
         GROUP BY 1 ORDER BY MIN(timestamp) ASC
-    """, (patient_id,))
+    """, (patient_id, days))
     graph_rows = cur.fetchall()
 
-    # 4. Succès/Badges Dynamiques
     cur.execute("SELECT COUNT(*), MAX(spo2), MIN(risk_score) FROM sensor_data WHERE patient_id = %s", (patient_id,))
     totals = cur.fetchone()
-    badges = {
-        "pionnier": totals[0] >= 1,
-        "expert": totals[0] >= 50,
-        "poumon_acier": (totals[1] or 0) >= 98,
-        "zen": (totals[2] or 1) < 0.2
-    }
+    
 
     cur.close(); conn.close()
     return {
         "risque_moyen": round(float(actuel) * 100, 1),
-        "amelioration_pourcent": diff,
         "jours_consecutifs": totals[0],
-        "alertes_preventives": 0, # À calculer selon status
-        "crises": 0,
-        "badges": badges,
         "graph_data": {
             "labels": [r[0] for r in graph_rows] if graph_rows else ["N/A"],
-            "values": [float(r[1]) for r in graph_rows] if graph_rows else [0]
+            "risk_values": [float(r[1]) for r in graph_rows] if graph_rows else [0],
+            "temp_values": [float(r[2]) for r in graph_rows] if graph_rows else [0]
         }
     }
 

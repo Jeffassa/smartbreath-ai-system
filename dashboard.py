@@ -9,13 +9,12 @@ from sqlalchemy import create_engine, text
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-# --- CONFIGURATION INITIALE ---
+
 load_dotenv()
 
 st.set_page_config(page_title="SmartBreath AI - Expert Dashboard", layout="wide")
 st_autorefresh(interval=2000, key="datarefresh") 
 
-# --- CONNEXION BASE DE DONNÉES ---
 @st.cache_resource
 def get_engine():
     try:
@@ -52,7 +51,6 @@ def get_live_data(p_id):
         return pd.DataFrame()
     
     try:
-        # REQUÊTE MISE À JOUR : Ajout de la colonne TEMPERATURE
         query = text("""
             SELECT 
                 patient_id::text as patient_id,
