@@ -1,8 +1,8 @@
-🩺 SmartBreath Monitoring AI
-📌 Présentation du Projet
+ SmartBreath Monitoring AI
+Présentation du Projet
 Ce projet est une solution complète de e-santé dédiée à la surveillance intelligente des patients atteints de pathologies respiratoires (Asthme, BPCO). Le système combine l'acquisition de données physiologiques simulées, une analyse prédictive par Intelligence Artificielle et une interface de monitoring pour le personnel médical.
 
-🌟 Fonctionnalités Clés
+ Fonctionnalités Clés
 Analyse Prédictive : Utilisation d'un modèle XGBoost pour évaluer le risque de crise respiratoire en temps réel.
 
 Anticipation (TTC) : Calcul du Time To Crisis pour prévenir les incidents avant qu'ils ne surviennent.
@@ -13,7 +13,7 @@ Génération de Rapports : Exportation automatique de bilans médicaux au format
 
 Alertes Intelligentes : Système d'alerte sonore et visuelle (bandeau clignotant) en cas de détection de seuils critiques.
 
-🏗️ Architecture Technique
+ Architecture Technique
 Le projet repose sur une architecture découplée pour garantir performance et sécurité :
 
 Backend (FastAPI) : Gère l'ingestion des données, la communication avec la base de données PostgreSQL et l'exécution du moteur IA.
@@ -24,7 +24,7 @@ Moteur IA (XGBoost) : Modèle entraîné sur 6 variables clés (SpO2, BPM, débi
 
 Frontend (Streamlit) : Interface utilisateur pour le monitoring interactif et la gestion des dossiers.
 
-🚀 Installation et Démarrage
+Installation et Démarrage
 Prérequis
 Python 3.11+
 
@@ -51,7 +51,7 @@ Terminal 2 (Dashboard) : streamlit run dashboard.py
 
 Terminal 3 (Simulateur) : python mock_sensor.py
 
-📊 Algorithme et Logique IA
+Algorithme et Logique IA
 Le modèle intègre une logique métier pour une IA explicable :
 
 Score > 0.8 : Statut CRITIQUE -> Déclenchement immédiat des alarmes.
@@ -60,18 +60,6 @@ Analyse Contextuelle : L'IA ajuste son diagnostic en fonction de l'âge récupé
 
 Sécurité : En cas de données incohérentes, le système renvoie un statut "ERREUR IA" pour garantir la sécurité du patient.
 
-📁 Structure du Projet
-Plaintext
-
-app_backend/
-├── app.py                # Serveur FastAPI (Cerveau du projet)
-├── dashboard.py          # Interface Streamlit (Monitoring)
-├── mock_sensor.py        # Simulateur de capteurs (Télémétrie)
-├── ml_engine/
-│   ├── predictor.py      # Classe d'inférence et logique IA
-│   ├── train_model.py    # Script de génération du modèle XGBoost
-│   └── models/           # Dossier contenant le modèle .json
-├── requirements.txt      # Liste des dépendances Python
-└── README.md             # Documentation du projet
-👨‍💻 Auteur
+            # Documentation du projet
+Auteur
 Jeff Assale - Développeur Backend & IA
