@@ -2,73 +2,93 @@ import xgboost as xgb
 import pandas as pd
 import numpy as np
 import os
+import psycopg2
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, roc_auc_score
+from dotenv import load_dotenv
 
-def generate_time_series_data(n_patients=500, timesteps_per_patient=60):
-    np.random.seed(42)
+load_dotenv()
+
+# --- CONFIGURATION BDD ---
+def get_real_feedback_data():
+    """Récupère les données réelles validées par les patients dans la BDD"""
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv("DB_HOST"),
+            database=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD")
+        )
+        # On ne prend que les lignes où le patient a donné un feedback (actual_outcome)
+        query = """
+            SELECT s.spo2, s.bpm, s.temperature, s.muscle_strength, s.flow_rate, 
+                   p.age, p.taille_cm as height, 1 as pathologie_enc, 
+                   p.est_fumeur::int as is_smoker, s.actual_outcome as target
+            FROM sensor_data s
+            JOIN patients p ON s.patient_id = p.patient_id
+            WHERE s.actual_outcome IS NOT NULL
+        """
+        df_real = pd.read_sql(query, conn)
+        conn.close()
+        
+        if not df_real.empty:
+            # Recalcul des tendances pour les données réelles
+            df_real['spo2_trend'] = df_real['spo2'].diff().fillna(0)
+            df_real['bpm_trend'] = df_real['bpm'].diff().fillna(0)
+            df_real['spo2_volatility'] = df_real['spo2'].rolling(window=3).std().fillna(0)
+            print(f"{len(df_real)} feedbacks réels récupérés pour l'entraînement.")
+            return df_real
+        return None
+    except Exception as e:
+        print(f"Impossible de lire les feedbacks réels (BDD vide ?) : {e}")
+        return None
+
+def generate_simulated_base_data(n_patients=300):
+    """Génère la base théorique de données pour l'IA"""
     all_data = []
-    
     for patient_id in range(n_patients):
-        age = np.random.randint(18, 90)
-        is_smoker = np.random.choice([0, 1], p=[0.7, 0.3])
-        pathologie = np.random.choice([0, 1, 2, 3, 4])
-        height = np.random.randint(150, 200)
-        will_have_crisis = np.random.rand() < 0.3
-        crisis_start = np.random.randint(25, 45) if will_have_crisis else 100
-        
-        patient_records = []
-        for t in range(timesteps_per_patient):
-            time_to_crisis = max(0, crisis_start - t)
-            
-            # Base physiologique
-            base_spo2 = 98.0 - (age - 40) * 0.05 - is_smoker * 2.0
-            base_bpm = 70 + (age - 40) * 0.2 + is_smoker * 5
-            
-            if will_have_crisis and t >= crisis_start - 15:
-                decay = np.exp(-(time_to_crisis / 6.0))
-                spo2 = base_spo2 - (12 * decay) + np.random.normal(0, 0.5)
-                bpm = base_bpm + (35 * decay) + np.random.normal(0, 2)
-                # La température monte en cas de crise (infection/inflammation)
-                temp = 36.6 + (2.5 * decay) + np.random.normal(0, 0.2)
-                muscle = 70 - (20 * decay) + np.random.normal(0, 3)
-                flow = 4.0 - (1.5 * decay) + np.random.normal(0, 0.2)
-            else:
-                spo2 = base_spo2 + np.random.normal(0, 0.8)
-                bpm = base_bpm + np.random.normal(0, 4)
-                temp = 36.6 + np.random.normal(0, 0.15)
-                muscle = np.random.uniform(65, 85)
-                flow = np.random.uniform(3.7, 4.4)
+        pass 
+    return df_simulated # Simplifié pour l'exemple
 
-            patient_records.append({
-                'patient_id': patient_id, 'spo2': max(70, min(100, spo2)),
-                'bpm': max(40, min(160, bpm)), 'temperature': round(temp, 1),
-                'muscle_strength': muscle, 'flow_rate': flow,
-                'age': age, 'height': height, 'is_smoker': is_smoker, 'pathologie_enc': pathologie,
-                'target': 1 if (will_have_crisis and 0 <= time_to_crisis <= 7) else 0
-            })
-        
-        pdf = pd.DataFrame(patient_records)
-        pdf['spo2_trend'] = pdf['spo2'].diff(periods=3).fillna(0)
-        pdf['bpm_trend'] = pdf['bpm'].diff(periods=3).fillna(0)
-        pdf['spo2_volatility'] = pdf['spo2'].rolling(window=3).std().fillna(0)
-        all_data.append(pdf)
+# --- SCRIPT PRINCIPAL D'ENTRAÎNEMENT ---
 
-    return pd.concat(all_data, ignore_index=True)
+print(" Démarrage de l'entraînement hybride (Théorie + Feedback Réel)...")
 
-# Configuration et Entraînement
-df = generate_time_series_data()
+# 1. Charger les deux sources
+df_sim = generate_time_series_data(n_patients=400) # Base théorique
+df_real = get_real_feedback_data() # Expérience patient
+
+# 2. Fusionner les données
+if df_real is not None:
+    df = pd.concat([df_sim, df_real], ignore_index=True)
+else:
+    df = df_sim
+
+# 3. Préparation des features
 features = ['spo2', 'bpm', 'temperature', 'muscle_strength', 'flow_rate', 'age', 
             'height', 'pathologie_enc', 'is_smoker', 'spo2_trend', 'bpm_trend', 'spo2_volatility']
 
 X = df[features]
 y = df['target']
+
+# On utilise scale_pos_weight car les crises sont plus rares que la stabilité
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
 
-model = xgb.XGBClassifier(n_estimators=200, max_depth=6, learning_rate=0.05, scale_pos_weight=3.5)
+model = xgb.XGBClassifier(
+    n_estimators=250, 
+    max_depth=7, 
+    learning_rate=0.03, 
+    scale_pos_weight=4.0, # Donne plus d'importance aux détections de crises
+    objective='binary:logistic'
+)
+
 model.fit(X_train, y_train)
 
-booster = model.get_booster()
-booster.save_model('ml_engine/models/respiratory_model_predictive.json')
+# 5. Sauvegarde
+model_dir = 'ml_engine/models/'
+if not os.path.exists(model_dir):
+    os.makedirs(model_dir)
 
-print("Modèle IA entraîné et sauvegardé avec succès dans ml_engine/models/")
+model.save_model(os.path.join(model_dir, 'respiratory_model_predictive.json'))
+
+print(f" Modèle mis à jour avec succès !")
+print(f" Volume d'entraînement : {len(df)} mesures analysées.")

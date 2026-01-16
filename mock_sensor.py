@@ -11,6 +11,7 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 URL_API = os.getenv("API_URL", "http://127.0.0.1:8000/analyze")
+URL_FEEDBACK = os.getenv("FEEDBACK_URL", "http://127.0.0.1:8000/feedback")
 
 def get_patient_by_email(email):
     """Récupère les informations complètes du patient depuis la base de données"""
@@ -45,7 +46,7 @@ class PhysiologicalSimulator:
     def __init__(self, patient_info):
         self.patient = patient_info
         self.step = 0
-        self.buffer = [] # Pour calcul des tendances (spo2, bpm)
+        self.buffer = [] 
         
         # Initialisation des baselines selon le profil
         age_factor = (self.patient['age'] - 40) * 0.05
@@ -57,7 +58,6 @@ class PhysiologicalSimulator:
         self.baseline_muscle = 75.0 - age_factor * 2
         self.baseline_flow = 4.2 - age_factor * 0.05
         
-        # État actuel
         self.current_spo2 = self.baseline_spo2
         self.current_bpm = self.baseline_bpm
         self.current_temp = self.baseline_temp
@@ -89,37 +89,29 @@ class PhysiologicalSimulator:
     def generate_measure(self):
         phase, intensity = self.get_phase()
         
-        # Calcul des cibles avec intégration de la température
         if phase == "STABLE":
             target_spo2, target_bpm = self.baseline_spo2, self.baseline_bpm
             target_temp = self.baseline_temp + random.uniform(-0.1, 0.1)
         elif phase == "DÉGRADATION" or phase == "CRISE AIGUË":
             target_spo2 = self.baseline_spo2 - (15 * intensity)
             target_bpm = self.baseline_bpm + (50 * intensity)
-            # La température monte si infection ou crise sévère
             target_temp = self.baseline_temp + (2.5 * intensity)
         else: # RÉCUPÉRATION
             target_spo2 = self.baseline_spo2 - (5 * intensity)
             target_bpm = self.baseline_bpm + (15 * intensity)
             target_temp = self.baseline_temp + (0.5 * intensity)
 
-        # Lissage (Inertie physiologique)
         smoothing = 0.15
         self.current_spo2 += (target_spo2 - self.current_spo2) * smoothing
         self.current_bpm += (target_bpm - self.current_bpm) * smoothing
-        self.current_temp += (target_temp - self.current_temp) * 0.1 # Plus lent pour la temp
+        self.current_temp += (target_temp - self.current_temp) * 0.1 
         
         final_spo2 = round(max(70.0, min(100.0, self.current_spo2 + random.uniform(-0.3, 0.3))), 1)
         final_bpm = int(max(40, min(160, self.current_bpm + random.uniform(-1, 1))))
         final_temp = round(self.current_temp + random.uniform(-0.05, 0.05), 1)
 
-        # Calcul des tendances et volatilité (Buffer de 5 mesures)
         self.buffer.append({'spo2': final_spo2, 'bpm': final_bpm})
         if len(self.buffer) > 5: self.buffer.pop(0)
-
-        spo2_trend = self.buffer[-1]['spo2'] - self.buffer[0]['spo2'] if len(self.buffer) > 1 else 0
-        bpm_trend = self.buffer[-1]['bpm'] - self.buffer[0]['bpm'] if len(self.buffer) > 1 else 0
-        spo2_vol = np.std([x['spo2'] for x in self.buffer]) if len(self.buffer) > 1 else 0
 
         return {
             "patient_id": self.patient["id"],
@@ -128,13 +120,6 @@ class PhysiologicalSimulator:
             "temperature": final_temp,
             "muscle_strength": round(self.current_muscle, 1),
             "flow_rate": round(self.current_flow, 2),
-            "age": self.patient['age'],
-            "height": self.patient['height'],
-            "pathologie_enc": 1, 
-            "is_smoker": int(self.patient['est_fumeur']),
-            "spo2_trend": round(spo2_trend, 2),
-            "bpm_trend": round(bpm_trend, 2),
-            "spo2_volatility": round(spo2_vol, 2),
             "phase": phase
         }
 
@@ -144,16 +129,15 @@ class PhysiologicalSimulator:
             self.current_scenario = random.choice(self.scenarios[:3]) if random.random() < 0.7 else self.scenarios[3]
 
 # --- BOUCLE PRINCIPALE ---
-print("Démarrage du Simulateur Physiologique v2.5 (Température & IA Trends)")
+print("Démarrage du Simulateur Physiologique v3.0 (Boucle de Feedback IA)")
 email_input = input("Email du patient : ").strip()
 patient = get_patient_by_email(email_input)
 
 if not patient:
-    print("Erreur : Patient introuvable.")
-    exit(1)
+    print("Erreur : Patient introuvable."); exit(1)
 
 simulator = PhysiologicalSimulator(patient)
-print(f"Simulation lancée pour {patient['prenom']} {patient['nom']} (Scénario: {simulator.current_scenario['name']})")
+print(f"Simulation lancée pour {patient['prenom']} {patient['nom']}")
 
 try:
     while True:
@@ -161,27 +145,36 @@ try:
         phase = measure.pop('phase')
         
         try:
+            # 1. ENVOI DE LA MESURE
             response = requests.post(URL_API, json=measure, timeout=5)
             if response.status_code == 200:
                 data = response.json()
+                data_id = data.get('data_id') # Très important pour le feedback !
                 status = data.get('status', 'STABLE')
-                risk = data.get('risk_score', 0) * 100
+                risk = data.get('risk_score', 0)
                 
-                # Formatage console
-                color = "\033[92m" # Vert
-                if status == "CRITIQUE": color = "\033[91m" # Rouge
-                elif status == "PRÉVENTION": color = "\033[93m" # Jaune
-                
-                print(f"[{simulator.step:03d}] {phase:12s} | "
-                      f"SpO2: {measure['spo2']}% ({measure['spo2_trend']:+g}) | "
-                      f"Temp: {measure['temperature']}°C | "
-                      f"Risque: {risk:4.1f}% | {color}{status}\033[0m")
-            else:
-                print(f"Erreur API: {response.status_code}")
+                # 2. SIMULATION DU FEEDBACK PATIENT (Apprentissage supervisé)
+                # Si le risque est > 60%, le patient confirme souvent qu'il va mal
+                if risk > 0.6 and random.random() < 0.85:
+                    feedback_payload = {
+                        "data_id": data_id,
+                        "actual_outcome": 1, # "Je me sens mal"
+                        "comment": "Simulation: Patient confirme la gêne respiratoire."
+                    }
+                    requests.post(URL_FEEDBACK, json=feedback_payload)
+                elif risk < 0.2 and random.random() < 0.1:
+                    # Rarement, on envoie un feedback "Tout va bien" pour confirmer la stabilité
+                    feedback_payload = {"data_id": data_id, "actual_outcome": 0, "comment": "Simulation: Patient confirme que tout va bien."}
+                    requests.post(URL_FEEDBACK, json=feedback_payload)
+
+                # Affichage console
+                color = "\033[92m" if status == "STABLE" else "\033[93m" if status == "PRÉVENTION" else "\033[91m"
+                print(f"[{simulator.step:03d}] {phase:12s} | SpO2: {measure['spo2']}% | Temp: {measure['temperature']}°C | Risque: {risk*100:4.1f}% | {color}{status}\033[0m")
+            
         except Exception as e:
-            print(f"Erreur connexion : {e}")
+            print(f"Erreur : {e}")
         
         simulator.next_step()
         time.sleep(1.5)
 except KeyboardInterrupt:
-    print("\nSimulation arrêtée par l'utilisateur.")
+    print("\nSimulation arrêtée.")

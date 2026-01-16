@@ -23,17 +23,19 @@ class RespiratoryAI:
             self.history = {} 
             self.model_ready = True
             print(f" IA SmartBreath chargée avec succès depuis : {model_path}")
+            print(f" Mode : Apprentissage Supervisé par Feedback activé.")
         except Exception as e:
             logger.error(f" Erreur lors du chargement du modèle : {e}")
             raise e
 
     def predict(self, data):
         """
-        Prend en entrée les données capteurs et le contexte patient,
-        calcule les tendances et renvoie un score de risque et un statut.
+        Analyse les données capteurs, calcule les tendances et retourne 
+        un score de risque basé sur le modèle XGBoost.
         """
         p_id = str(data.get('patient_id', 'unknown'))
         
+        # Gestion de l'historique pour les tendances (Trends)
         if p_id not in self.history:
             self.history[p_id] = deque(maxlen=5)
         
@@ -43,15 +45,19 @@ class RespiratoryAI:
         })
 
         hist = list(self.history[p_id])
+        
+        # Calcul des caractéristiques dynamiques (Feature Engineering)
         spo2_trend = hist[-1]['spo2'] - hist[0]['spo2'] if len(hist) > 1 else 0
         bpm_trend = hist[-1]['bpm'] - hist[0]['bpm'] if len(hist) > 1 else 0
         spo2_vol = np.std([x['spo2'] for x in hist]) if len(hist) > 1 else 0
 
+        # Liste des colonnes attendues par le modèle XGBoost
         feat_cols = [
             'spo2', 'bpm', 'temperature', 'muscle_strength', 'flow_rate', 'age', 
             'height', 'pathologie_enc', 'is_smoker', 'spo2_trend', 'bpm_trend', 'spo2_volatility'
         ]
         
+        # Construction du DataFrame pour la prédiction
         feat_values = pd.DataFrame([{
             'spo2': data.get('spo2', 95),
             'bpm': data.get('bpm', 70),
@@ -67,27 +73,40 @@ class RespiratoryAI:
             'spo2_volatility': spo2_vol
         }])
 
+        # Prédiction via XGBoost
         dmatrix = xgb.DMatrix(feat_values[feat_cols])
         proba = float(self.model.predict(dmatrix)[0])
         
+        # Logique de décision (Heuristiques médicales + IA)
         temp = data.get('temperature', 36.6)
         spo2 = data.get('spo2', 95)
 
+        # 1. Cas d'urgence absolue
         if proba > 0.80 or spo2 < 88:
             status = "CRITIQUE"
-            rec = "Alerte : Insuffisance respiratoire sévère détectée. Contactez les urgences."
+            rec = "Alerte : Insuffisance respiratoire sévère détectée. Contactez les urgences immédiatement."
+        
+        # 2. Cas de dégradation infectieuse (Fièvre + IA)
         elif proba > 0.60 or (temp > 38.5 and proba > 0.4):
             status = "PRÉVENTION"
-            rec = "Risque élevé : Fièvre et instabilité respiratoire. Consultez un médecin rapidement."
-        elif proba > 0.35 or spo2 < 93:
+            rec = "Risque élevé : Une fièvre associée à une instabilité respiratoire a été détectée. Consultez un médecin."
+        
+        # 3. Cas de fatigue ou début d'encombrement
+        elif proba > 0.35 or spo2 < 93 or spo2_trend < -2:
             status = "SURVEILLANCE"
-            rec = "Vigilance : Signes de fatigue détectés. Reposez-vous et suivez votre traitement."
+            rec = "Vigilance : Signes de fatigue ou baisse de SpO2. Reposez-vous et surveillez votre respiration."
+        
+        # 4. Cas stable
         else:
             status = "STABLE"
-            rec = "Tout est normal. Continuez votre suivi habituel."
+            rec = "Tout est normal. Votre état respiratoire est stable."
 
         return {
             "risk_score": proba, 
             "status": status, 
-            "recommendation": rec
+            "recommendation": rec,
+            "trends": {
+                "spo2_trend": round(spo2_trend, 2),
+                "bpm_trend": round(bpm_trend, 2)
+            }
         }
