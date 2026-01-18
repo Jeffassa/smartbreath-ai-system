@@ -59,7 +59,3 @@ Score > 0.8 : Statut CRITIQUE -> Déclenchement immédiat des alarmes.
 Analyse Contextuelle : L'IA ajuste son diagnostic en fonction de l'âge récupéré en base SQL (différenciation entre une crise d'asthme juvénile et une complication de BPCO chez le senior).
 
 Sécurité : En cas de données incohérentes, le système renvoie un statut "ERREUR IA" pour garantir la sécurité du patient.
-
-            # Documentation du projet
-Auteur
-Jeff Assale - Développeur Backend & IA
