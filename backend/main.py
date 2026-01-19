@@ -41,8 +41,6 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 
-# --- MODÈLES DE DONNÉES ---
-
 class RespiratoryMeasure(BaseModel):
     patient_id: str
     flow_rate: float
@@ -53,7 +51,7 @@ class RespiratoryMeasure(BaseModel):
 
 class FeedbackData(BaseModel):
     data_id: int
-    actual_outcome: int  # 1 pour "Crise/Mal", 0 pour "Bien/Fausse alerte"
+    actual_outcome: int 
     comment: Optional[str] = None
 
 class UserRegister(BaseModel):
@@ -78,8 +76,6 @@ class ProfileUpdate(BaseModel):
     pathologie: Optional[str] = None
     photo_base64: Optional[str] = None
 
-
-# --- FONCTIONS UTILITAIRES ---
 
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
@@ -112,21 +108,25 @@ def save_to_db(patient_id, measure, risk_score, status, recommendation):
 
 def get_patient_context(patient_id):
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("""
-            SELECT age, taille_cm, pathologie, nom, prenom, est_fumeur, poids_kg, email 
+            SELECT age, taille_cm, pathologie, nom, prenom, est_fumeur, poids_kg, email, photo_base64 
             FROM patients WHERE patient_id = %s
         """, (patient_id,))
-        res = cur.fetchone(); cur.close(); conn.close()
+        res = cur.fetchone()
+        cur.close()
+        conn.close()
         if res:
             return {
                 "age": res[0], "height": res[1], "pathologie": res[2], 
                 "nom": res[3], "prenom": res[4], "is_smoker": bool(res[5]), 
-                "weight": res[6], "email": res[7]
+                "weight": res[6], "email": res[7],
+                "photo_url": res[8] 
             }
     except Exception as e:
         logger.error(f"Erreur contexte patient : {e}")
-    return {"age": 45, "height": 170, "pathologie": "Non spécifié", "nom": "Patient", "prenom": "", "is_smoker": False, "weight": 70}
+    return {"nom": "Patient", "photo_url": None}
 
 def generate_mobile_response(status, recommendation, spo2):
     status_config = {
@@ -137,7 +137,6 @@ def generate_mobile_response(status, recommendation, spo2):
     }
     return status_config.get(status, {"color": "grey", "vibrate": False, "emergency": False})
 
-# --- ROUTES API ---
 
 @app.post("/register")
 async def register(user: UserRegister):
@@ -173,7 +172,6 @@ async def analyze(measure: RespiratoryMeasure):
     recommendation = ai_res.get('recommendation', 'Analyse terminée')
     mobile_content = generate_mobile_response(status, recommendation, measure.spo2)
     
-    # On sauvegarde et on récupère l'ID pour le feedback
     data_id = save_to_db(measure.patient_id, measure, risk_score, status, recommendation)
     
     res_payload = {
@@ -214,9 +212,11 @@ async def get_profile(patient_id: str):
 @app.put("/profile/{patient_id}")
 async def update_profile(patient_id: str, profile: ProfileUpdate):
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         updates = []
         params = []
+
         if profile.taille_cm is not None:
             updates.append("taille_cm = %s"); params.append(profile.taille_cm)
         if profile.poids_kg is not None:
@@ -224,16 +224,23 @@ async def update_profile(patient_id: str, profile: ProfileUpdate):
         if profile.pathologie is not None:
             updates.append("pathologie = %s"); params.append(profile.pathologie)
         
+        if profile.photo_base64 is not None:
+            updates.append("photo_base64 = %s")
+            params.append(profile.photo_base64)
+
         if not updates:
             return {"status": "no update needed"}
 
         params.append(patient_id)
         query = f"UPDATE patients SET {', '.join(updates)} WHERE patient_id = %s"
-        cur.execute(query, tuple(params))
-        conn.commit(); cur.close(); conn.close()
         
-        logger.info(f"Profil recalibré pour le patient {patient_id}")
-        return {"status": "success", "message": "IA Recalibrée"}
+        cur.execute(query, tuple(params))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        logger.info(f"Profil et photo mis à jour pour le patient {patient_id}")
+        return {"status": "success", "message": "Profil et Photo synchronisés"}
     except Exception as e:
         logger.error(f"Erreur update profile : {e}")
         raise HTTPException(status_code=500, detail=str(e))

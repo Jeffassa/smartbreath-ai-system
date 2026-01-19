@@ -9,9 +9,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- CONFIGURATION ---
-URL_API = os.getenv("API_URL", "http://127.0.0.1:8000/analyze")
-URL_FEEDBACK = os.getenv("FEEDBACK_URL", "http://127.0.0.1:8000/feedback")
+
+BASE_IP = "192.168.1.7" 
+URL_API = os.getenv("API_URL", f"http://{BASE_IP}:8000/analyze")
+URL_FEEDBACK = os.getenv("FEEDBACK_URL", f"http://{BASE_IP}:8000/feedback")
+
+session = requests.Session()
 
 def get_patient_by_email(email):
     """Récupère les informations complètes du patient depuis la base de données"""
@@ -48,7 +51,6 @@ class PhysiologicalSimulator:
         self.step = 0
         self.buffer = [] 
         
-        # Initialisation des baselines selon le profil
         age_factor = (self.patient['age'] - 40) * 0.05
         smoker_penalty = 2.0 if self.patient['est_fumeur'] else 0.0
         
@@ -96,7 +98,7 @@ class PhysiologicalSimulator:
             target_spo2 = self.baseline_spo2 - (15 * intensity)
             target_bpm = self.baseline_bpm + (50 * intensity)
             target_temp = self.baseline_temp + (2.5 * intensity)
-        else: # RÉCUPÉRATION
+        else: 
             target_spo2 = self.baseline_spo2 - (5 * intensity)
             target_bpm = self.baseline_bpm + (15 * intensity)
             target_temp = self.baseline_temp + (0.5 * intensity)
@@ -128,7 +130,7 @@ class PhysiologicalSimulator:
         if self.step % 100 == 0:
             self.current_scenario = random.choice(self.scenarios[:3]) if random.random() < 0.7 else self.scenarios[3]
 
-# --- BOUCLE PRINCIPALE ---
+
 print("Démarrage du Simulateur Physiologique v3.0 (Boucle de Feedback IA)")
 email_input = input("Email du patient : ").strip()
 patient = get_patient_by_email(email_input)
@@ -138,6 +140,7 @@ if not patient:
 
 simulator = PhysiologicalSimulator(patient)
 print(f"Simulation lancée pour {patient['prenom']} {patient['nom']}")
+print(f"Cible API : {URL_API}")
 
 try:
     while True:
@@ -145,32 +148,29 @@ try:
         phase = measure.pop('phase')
         
         try:
-            # 1. ENVOI DE LA MESURE
-            response = requests.post(URL_API, json=measure, timeout=5)
+            response = session.post(URL_API, json=measure, timeout=20)
+            
             if response.status_code == 200:
                 data = response.json()
-                data_id = data.get('data_id') # Très important pour le feedback !
+                data_id = data.get('data_id') 
                 status = data.get('status', 'STABLE')
                 risk = data.get('risk_score', 0)
-                
-                # 2. SIMULATION DU FEEDBACK PATIENT (Apprentissage supervisé)
-                # Si le risque est > 60%, le patient confirme souvent qu'il va mal
+
                 if risk > 0.6 and random.random() < 0.85:
                     feedback_payload = {
                         "data_id": data_id,
-                        "actual_outcome": 1, # "Je me sens mal"
+                        "actual_outcome": 1,
                         "comment": "Simulation: Patient confirme la gêne respiratoire."
                     }
-                    requests.post(URL_FEEDBACK, json=feedback_payload)
-                elif risk < 0.2 and random.random() < 0.1:
-                    # Rarement, on envoie un feedback "Tout va bien" pour confirmer la stabilité
-                    feedback_payload = {"data_id": data_id, "actual_outcome": 0, "comment": "Simulation: Patient confirme que tout va bien."}
-                    requests.post(URL_FEEDBACK, json=feedback_payload)
-
-                # Affichage console
+                    session.post(URL_FEEDBACK, json=feedback_payload, timeout=5)
+                
                 color = "\033[92m" if status == "STABLE" else "\033[93m" if status == "PRÉVENTION" else "\033[91m"
                 print(f"[{simulator.step:03d}] {phase:12s} | SpO2: {measure['spo2']}% | Temp: {measure['temperature']}°C | Risque: {risk*100:4.1f}% | {color}{status}\033[0m")
+            else:
+                print(f"Erreur Serveur: {response.status_code}")
             
+        except requests.exceptions.ConnectTimeout:
+            print(f"[{simulator.step:03d}] Erreur : Connexion expirée (Timeout). Le serveur à {URL_API} est-il lancé ?")
         except Exception as e:
             print(f"Erreur : {e}")
         
