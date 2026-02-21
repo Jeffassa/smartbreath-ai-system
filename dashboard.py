@@ -126,17 +126,30 @@ if selected_id:
             st.subheader(status_label)
             st.caption(connection_msg)
 
+        # Alerte Critique (IA + Seuil de sécurité)
         is_critique = str(last.get('status', '')).upper() == "CRITIQUE" or last['spo2'] < 90
+        
         if is_critique:
             st.error(f" ALERTE CRITIQUE : {last.get('recommendation')}")
-
+            
+           
             sound_html = """
-                <audio autoplay>
-                    <source src="https://www.soundjay.com/buttons/beep-01a.mp3" type="audio/mpeg">
-                </audio>
+                <div style="display:none;">
+                    <audio id="alarm-audio" autoplay loop>
+                        <source src="https://actions.google.com/sounds/v1/alarms/alarm_clock_short.ogg" type="audio/ogg">
+                        <source src="https://www.soundjay.com/buttons/beep-01a.mp3" type="audio/mpeg">
+                    </audio>
+                    <script>
+                        var audio = document.getElementById("alarm-audio");
+                        audio.volume = 1.0;
+                        // Forcer la lecture si le navigateur bloque
+                        document.addEventListener('click', function() {
+                            audio.play();
+                        }, { once: true });
+                    </script>
+                </div>
             """
             st.components.v1.html(sound_html, height=0)
-
         st.write("---")
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Oxygène (SpO2)", f"{last['spo2']}%", delta=f"{last['spo2']-95:.1f}%" if last['spo2'] < 95 else None, delta_color="inverse")
