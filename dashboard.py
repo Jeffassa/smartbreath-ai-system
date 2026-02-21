@@ -8,6 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import create_engine, text
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import base64
 
 # Configuration et Chargement
 load_dotenv()
@@ -46,10 +47,9 @@ def get_patient_details(p_id):
 def get_live_data(p_id):
     engine = get_engine()
     if not engine: 
-        return pd.DataFrame() # Retourne un DF vide au lieu de None
+        return pd.DataFrame() 
     
     try:
-        # Requête pour récupérer les mesures du patient (actual_outcome et feedback inclus)
         query = text("""
             SELECT 
                 patient_id::text as patient_id,
@@ -66,18 +66,15 @@ def get_live_data(p_id):
         with engine.connect() as conn:
             df = pd.read_sql(query, conn, params={"p_id": str(p_id)})
         
-        # Si la requête ne renvoie rien (nouveau patient), on retourne un DF vide
         if df is None or df.empty:
             return pd.DataFrame()
-        
-        # Traitement des dates pour l'affichage
+  
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True).dt.tz_localize(None)
         df = df.sort_values('timestamp').reset_index(drop=True)
         
         return df
 
     except Exception as e:
-        # En cas d'erreur SQL, on affiche l'erreur mais on retourne un DF vide pour ne pas faire crash dashboard.py
         st.error(f"Erreur SQL dans get_live_data : {e}")
         return pd.DataFrame()
 
@@ -112,7 +109,6 @@ except Exception as e:
     st.sidebar.error(f"Erreur : {e}")
     selected_id = None
 
-# --- AFFICHAGE PRINCIPAL ---
 if selected_id:
     patient_info = get_patient_details(selected_id)
     user_data = get_live_data(selected_id)
@@ -123,20 +119,24 @@ if selected_id:
         last = user_data.iloc[-1]
         status_label, connection_msg = check_connection_status(last['timestamp'])
         
-        # En-tête avec état de connexion
         col_t1, col_t2 = st.columns([3, 1])
         with col_t1:
             st.title(f"Monitoring : {patient_info['nom']} {patient_info['prenom']}")
         with col_t2:
             st.subheader(status_label)
             st.caption(connection_msg)
-        
-        # Alerte Critique (IA + Seuil de sécurité)
+
         is_critique = str(last.get('status', '')).upper() == "CRITIQUE" or last['spo2'] < 90
         if is_critique:
             st.error(f" ALERTE CRITIQUE : {last.get('recommendation')}")
 
-        # --- MÉTRIQUES CLÉS ---
+            sound_html = """
+                <audio autoplay>
+                    <source src="https://www.soundjay.com/buttons/beep-01a.mp3" type="audio/mpeg">
+                </audio>
+            """
+            st.components.v1.html(sound_html, height=0)
+
         st.write("---")
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Oxygène (SpO2)", f"{last['spo2']}%", delta=f"{last['spo2']-95:.1f}%" if last['spo2'] < 95 else None, delta_color="inverse")
@@ -148,7 +148,6 @@ if selected_id:
         m4.metric("Force Musc.", f"{last.get('muscle_strength', 'N/A')}")
         m5.metric("Débit d'air", f"{last.get('flow_rate', 'N/A')} L/m")
 
-        # --- GRAPHIQUES ---
         st.subheader("Courbes Physiologiques (Temps Réel)")
         if len(user_data) > 1:
             plt.style.use('dark_background')
@@ -167,8 +166,7 @@ if selected_id:
             ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
             st.pyplot(fig)
             plt.close(fig)
-
-        # --- ANALYSE IA & FEEDBACK PATIENT ---
+            
         st.write("---")
         col_ia, col_p = st.columns(2)
         
@@ -176,12 +174,11 @@ if selected_id:
             st.subheader("Intelligence Artificielle")
             risk_pct = round(float(last.get('risk_score', 0)) * 100)
             
-            # Détermination de la couleur selon le feedback
             feedback = last.get('actual_outcome')
-            if feedback == 1: # Patient a confirmé qu'il va mal
+            if feedback == 1: 
                 color_risk = "red"
                 fb_msg = " LE PATIENT CONFIRME LA DÉTRESSE"
-            elif feedback == 0: # Patient dit qu'il va bien
+            elif feedback == 0: 
                 color_risk = "green"
                 fb_msg = " LE PATIENT DÉCLARE ALLER BIEN (Fausse alerte)"
             else:
@@ -202,7 +199,6 @@ if selected_id:
         # --- TABLEAU D'HISTORIQUE ---
         with st.expander("Consulter l'historique détaillé (60 dernières mesures)"):
             df_hist = user_data.sort_values('timestamp', ascending=False).copy()
-            # On mappe le outcome numérique en texte lisible
             df_hist['Vérité Terrain'] = df_hist['actual_outcome'].map({1: "Crise Confirmée", 0: "Stable (Fausse Alerte)"}).fillna("Non renseigné")
             
             cols = ['timestamp', 'spo2', 'bpm', 'temperature', 'status', 'Vérité Terrain', 'feedback_notes']
