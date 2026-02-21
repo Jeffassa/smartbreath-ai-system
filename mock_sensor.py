@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-BASE_IP = "192.168.1.7" 
+BASE_IP = "127.0.0.1" 
 URL_API = os.getenv("API_URL", f"http://{BASE_IP}:8000/analyze")
 URL_FEEDBACK = os.getenv("FEEDBACK_URL", f"http://{BASE_IP}:8000/feedback")
 

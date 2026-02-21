@@ -45,10 +45,11 @@ def get_patient_details(p_id):
 
 def get_live_data(p_id):
     engine = get_engine()
-    if not engine: return pd.DataFrame()
+    if not engine: 
+        return pd.DataFrame() # Retourne un DF vide au lieu de None
     
     try:
-        # MISE À JOUR : On récupère actual_outcome (feedback) et feedback_notes
+        # Requête pour récupérer les mesures du patient (actual_outcome et feedback inclus)
         query = text("""
             SELECT 
                 patient_id::text as patient_id,
@@ -65,13 +66,19 @@ def get_live_data(p_id):
         with engine.connect() as conn:
             df = pd.read_sql(query, conn, params={"p_id": str(p_id)})
         
-        if df.empty: return pd.DataFrame()
+        # Si la requête ne renvoie rien (nouveau patient), on retourne un DF vide
+        if df is None or df.empty:
+            return pd.DataFrame()
         
+        # Traitement des dates pour l'affichage
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True).dt.tz_localize(None)
         df = df.sort_values('timestamp').reset_index(drop=True)
+        
         return df
+
     except Exception as e:
-        st.error(f"Erreur SQL : {e}")
+        # En cas d'erreur SQL, on affiche l'erreur mais on retourne un DF vide pour ne pas faire crash dashboard.py
+        st.error(f"Erreur SQL dans get_live_data : {e}")
         return pd.DataFrame()
 
 def check_connection_status(last_timestamp):
